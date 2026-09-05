@@ -239,6 +239,56 @@ def test_before_model_can_jump_to_model() -> None:
     )
 
 
+def test_first_of_several_before_model_can_jump_to_model() -> None:
+    """The self-edge is missing for the first hook of a `before_model` chain too.
+
+    Only the first `before_model` node is the loop entry node, so a jump from the
+    second one already resolves to a different node and has always worked. This
+    covers the other half of the chain.
+    """
+    calls: list[str] = []
+
+    class RestartOnceMiddleware(AgentMiddleware):
+        @hook_config(can_jump_to=["model"])
+        @override
+        def before_model(self, state: AgentState[Any], runtime: Runtime) -> dict[str, Any] | None:
+            calls.append("first")
+            if len(calls) == 1:
+                return {"jump_to": "model"}
+            return None
+
+    class PassThroughMiddleware(AgentMiddleware):
+        @override
+        def before_model(self, state: AgentState[Any], runtime: Runtime) -> None:
+            calls.append("second")
+
+    @tool
+    def my_tool(value: str) -> str:
+        """A great tool."""
+        return value.upper()
+
+    agent = create_agent(
+        model=FakeToolCallingModel(
+            tool_calls=[
+                [ToolCall(id="1", name="my_tool", args={"value": "yo"})],
+                [],
+            ],
+        ),
+        tools=[my_tool],
+        middleware=[RestartOnceMiddleware(), PassThroughMiddleware()],
+    )
+
+    result = agent.invoke({"messages": [HumanMessage(content="hello")]})
+
+    # The jump short-circuits the rest of the chain, so the second hook runs
+    # once per model call while the first runs once more than that.
+    assert calls == ["first", "first", "second", "first", "second"]
+    assert any(
+        isinstance(message, ToolMessage) and message.tool_call_id == "1"
+        for message in result["messages"]
+    )
+
+
 def test_create_agent_jump(
     snapshot: SnapshotAssertion,
     sync_checkpointer: BaseCheckpointSaver[str],
